@@ -157,6 +157,110 @@ M.run = function()
   vim.fn.jobstart(tsc .. " " .. utils.parse_flags(config.flags), opts)
 end
 
+M.run_watch = function()
+  -- Closed over state
+  local tsc = config.bin_path
+  local errors = {}
+  local files_with_errors = {}
+  local notify_record
+  config.flags.watch = true
+  config.flags.enable_progress_notifications = false
+
+  vim.api.nvim_create_autocmd(
+    { "BufWritePost" },
+    {
+      pattern = "*.ts",
+      callback = function()
+        errors = {}
+      end
+    }
+  )
+
+  if not utils.is_executable(tsc) then
+    vim.notify(
+      format_notification_msg(
+        "tsc was not available or found in your node_modules or $PATH. Please run install and try again."
+      ),
+      vim.log.levels.ERROR,
+      get_notify_options()
+    )
+
+    return
+  end
+
+  if is_running then
+    vim.notify(format_notification_msg("Type-checking already in progress"), vim.log.levels.WARN, get_notify_options())
+    return
+  end
+
+  is_running = true
+
+  --- Looks for magic string in message
+  --- @param msg string
+  --- @return boolean
+  local function is_error_message(msg)
+    local start = msg:find("error TS%d+")
+    return start ~= nil
+  end
+
+  --- Handle stdout from the called procedure
+  --- @param _ integer
+  --- @param output table<integer, string>
+  local function on_stdout(_, output)
+    for _, v in pairs(output) do
+      if is_error_message(v) then
+        local result = utils.parse_tsc_output(output)
+        for _, u in pairs(result.errors) do
+          table.insert(errors, u)
+        end
+        for _, u in pairs(result.files) do
+          table.insert(files_with_errors, u)
+        end
+      else
+        utils.set_qflist(errors, { auto_open = config.auto_open_qflist, auto_close = config.auto_close_qflist })
+      end
+    end
+  end
+
+  local on_exit = function()
+    is_running = false
+
+    if not config.enable_progress_notifications then
+      return
+    end
+
+    if #errors == 0 then
+      vim.notify(
+        format_notification_msg("Type-checking complete. No errors found 🎉"),
+        nil,
+        get_notify_options((notify_record and { replace = notify_record.id }))
+      )
+      return
+    end
+
+    -- Clear any previous notifications if the user has nvim-notify installed
+    if nvim_notify ~= nil then
+      nvim_notify.dismiss()
+    end
+
+    vim.notify(
+      format_notification_msg(
+        string.format("Type-checking complete. Found %s errors across %s files 💥", #errors, #files_with_errors)
+      ),
+      vim.log.levels.ERROR,
+      get_notify_options()
+    )
+  end
+
+  local opts = {
+    on_stdout = on_stdout,
+    on_exit = on_exit,
+    stdout_buffered = false,
+  }
+
+  vim.fn.jobstart(tsc .. " " .. utils.parse_flags(config.flags), opts)
+end
+
 function M.is_running()
   return is_running
 end
@@ -167,6 +271,9 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("TSC", function()
     M.run()
   end, { desc = "Run `tsc` asynchronously and load the results into a qflist", force = true })
+  vim.api.nvim_create_user_command("TSCWatch", function()
+    M.run_watch()
+  end, { desc = "Run `tsc` in watch mode and load the results into a qflist", force = true })
 end
 
 return M
